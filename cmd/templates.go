@@ -12,8 +12,7 @@ OPTIONS:
    --commonName, --cn string          Subject Common Name
    --keyOpt string                    Specify key generation configuration: rsa:[bit-length], ec:[p256|p384|p521] (default: ec:p384)
 
-   --hash, -s string                  Signature algorithim hash function: SHA256, SHA384, SHA512, PURE (default: "SHA256")
-   --dsa, -d string                   Signature algorithim DSA: RSA, ECDSA, RSAPSS (default: "ECDSA")
+   --signature, -s string             Choose signature algorithim: [RSA, ECDSA, RSAPSS]:[SHA256, SHA384, SHA512] (default: ECDSA:SHA256)
 
    --country, -c string               Subject Country
    --org string, -o string            Subject Organization

@@ -1,6 +1,7 @@
 package csr
 
 import (
+	"cert-manager/certificates"
 	"cert-manager/internal/utils"
 	"context"
 	"crypto/ecdsa"
@@ -9,10 +10,11 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -20,142 +22,107 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-type CSRMapping struct {
-	raw                *x509.CertificateRequest
-	PublicKey          PublicKey `json:"publicKey"`
-	SignatureAlgorithm string    `json:"signatureAlgorithim"`
-	Subject            Subject   `json:"subject"`
-	SAN                SAN       `json:"san"`
+type CSR struct {
+	csr *x509.CertificateRequest
 }
 
-type PublicKey struct {
-	Modulus  string `json:"modulus,omitempty"`
-	Exponent int    `json:"exponent,omitempty"`
-	Pub      string `json:"pub,omitempty"`
-}
-
-type Subject struct {
-	CommonName         string `json:"commonName"`
-	Country            string `json:"country"`
-	Organization       string `json:"organization"`
-	OrganizationalUnit string `json:"organizationalUnit"`
-	Locality           string `json:"locality"`
-	State              string `json:"state"`
-	SerialNumber       string `json:"serialNumber"`
-}
-
-type SAN struct {
-	DNS    []string `json:"dns"`
-	IP     []string `json:"ip"`
-	Emails []string `json:"email"`
-	URIs   []string
-}
-
-func ParseCSR(csrBytes []byte) (CSRMapping, error) {
+func ParseCSR(csrBytes []byte) (CSR, error) {
 	csr, err := x509.ParseCertificateRequest(csrBytes)
 	if err != nil {
-		return CSRMapping{}, err
+		return CSR{}, err
 	}
 
-	var pk PublicKey
-	if csr.SignatureAlgorithm == x509.SHA512WithRSA || csr.SignatureAlgorithm == x509.SHA384WithRSA || csr.SignatureAlgorithm == x509.SHA256WithRSA {
+	return CSR{csr: csr}, nil
 
-		rsaKey, ok := csr.PublicKey.(*rsa.PublicKey)
-		if !ok {
-			return CSRMapping{}, fmt.Errorf("Failed to read public key")
-		}
-		pk.Modulus = fmt.Sprintf("%x", rsaKey.N.Bytes())
-		pk.Exponent = rsaKey.E
-
-	} else if csr.SignatureAlgorithm == x509.ECDSAWithSHA512 || csr.SignatureAlgorithm == x509.ECDSAWithSHA384 || csr.SignatureAlgorithm == x509.ECDSAWithSHA256 {
-		ecKey, err := csr.PublicKey.(*ecdsa.PublicKey).ECDH()
-		if err != nil {
-			return CSRMapping{}, err
-		}
-		pk.Pub = fmt.Sprintf("%x", ecKey.Bytes())
-
-	}
-
-	mapping := CSRMapping{
-		raw: csr,
-		// Key type which allows to print both rsa and ecc type keys
-		PublicKey:          pk,
-		SignatureAlgorithm: csr.SignatureAlgorithm.String(),
-		Subject: Subject{
-			CommonName:         csr.Subject.CommonName,
-			Country:            utils.GetFirstIndex(csr.Subject.Country),
-			Organization:       utils.GetFirstIndex(csr.Subject.Organization),
-			OrganizationalUnit: utils.GetFirstIndex(csr.Subject.OrganizationalUnit),
-			Locality:           utils.GetFirstIndex(csr.Subject.Locality),
-			State:              utils.GetFirstIndex(csr.Subject.Province),
-			SerialNumber:       csr.Subject.SerialNumber,
-		},
-		SAN: SAN{
-			DNS: csr.DNSNames,
-		},
-	}
-
-	return mapping, nil
 }
 
 // Add more fields to this output
-func (c CSRMapping) PrintCSR() (string, error) {
-	template := `
-Public Key: 
-  %s
+func (c CSR) PrintCSR() (string, error) {
+	var sb strings.Builder
 
-Signature Algorithim: %s
+	sb.WriteString("Certificate Request:\n")
+	sb.WriteString("    Data:\n")
 
-Subject:
-  Common Name: %s
-  Country: %s
-  Organization: %s
-  Organizational Unit: %s
-  Locality: %s
-  State: %s
-  Serial Number: %s
-
-SANs:
-  DNS: %v`
-
-	keyTemplate := `
-  Modulus:
-    %s
-
-  Exponent:
-    %d`
-
-	var key string
-	if c.PublicKey.Pub != "" {
-		key = utils.WrapText(c.PublicKey.Pub, 30, "\n  ")
-	} else if c.PublicKey.Modulus != "" {
-
-		key = fmt.Sprintf(keyTemplate, utils.WrapText(c.PublicKey.Modulus, 75, "\n    "), c.PublicKey.Exponent)
-	}
-
-	csrStr := fmt.Sprintf(template+"\n\n",
-		key,
-		c.SignatureAlgorithm,
-		c.Subject.CommonName,
-		c.Subject.Country,
-		c.Subject.Organization,
-		c.Subject.OrganizationalUnit,
-		c.Subject.Locality,
-		c.Subject.State,
-		c.Subject.SerialNumber,
-		c.SAN.DNS)
-
-	return csrStr, nil
-}
-
-func (c CSRMapping) JsonCSR() (string, error) {
-
-	out, err := json.MarshalIndent(c, "", "    ")
+	// Version
+	// Fix version bracketing
+	sb.WriteString("        Version: 1 (0x0)\n")
+	// Subject
+	sb.WriteString(fmt.Sprintf("        Subject: %s\n", c.csr.Subject.String()))
+	// Public Key Info
+	pkInfo, err := certificates.GetPublicKeyInfo(c.csr.PublicKeyAlgorithm.String(), c.csr.PublicKey)
 	if err != nil {
 		return "", err
 	}
+	sb.WriteString(pkInfo)
+	// Extensions
+	if len(c.csr.Extensions) > 0 {
+		sb.WriteString("        Attributes:\n")
+		sb.WriteString("                Requested Extensions:\n")
+		sb.WriteString(c.formatExtensions())
+	}
 
-	return string(out), nil
+	// Signature Algorithm (repeated)
+	sb.WriteString(fmt.Sprintf("    Signature Algorithm: %s\n", c.csr.SignatureAlgorithm.String()))
+
+	// Signature
+	signature := hex.EncodeToString(c.csr.Signature)
+	sb.WriteString(utils.FormatHexBlock(signature, 8) + "\n")
+
+	return sb.String(), nil
+
+}
+
+func (c CSR) formatExtensions() string {
+	var sb strings.Builder
+
+	// Process all extensions in order
+	for _, ext := range c.csr.Extensions {
+		extName, critical := certificates.GetExtensionName(ext.Id)
+
+		if critical && ext.Critical {
+			sb.WriteString(fmt.Sprintf("                    %s: critical\n", extName))
+		} else {
+			sb.WriteString(fmt.Sprintf("                    %s:\n", extName))
+		}
+
+		switch {
+		// Subject Key Identifier
+		case ext.Id.Equal(certificates.OidExtensionSubjectKeyId):
+			ski := certificates.FormatSubjectKeyIdentifier(ext.Value)
+			sb.WriteString(fmt.Sprintf("                        %s\n", ski))
+
+		// Subject Alternative Name
+		case ext.Id.Equal(certificates.OidExtensionSubjectAltName):
+			san := certificates.FormatSubjectAlternativeName(c.csr.DNSNames, c.csr.IPAddresses, c.csr.EmailAddresses, c.csr.URIs)
+			sb.WriteString(fmt.Sprintf("                        %s\n", san))
+
+		// Certificate Policies
+		case ext.Id.Equal(certificates.OidExtensionCertificatePolicies):
+			policies := certificates.FormatCertificatePolicies(ext.Value)
+			sb.WriteString(fmt.Sprintf("                        %s\n", policies))
+
+		// Inhibit Any Policy
+		case ext.Id.Equal(certificates.OidExtensionInhibitAnyPolicy):
+			inhibit := certificates.FormatInhibitAnyPolicy(ext.Value)
+			sb.WriteString(fmt.Sprintf("                        %s\n", inhibit))
+
+		// CT Precertificate SCTs
+		case ext.Id.Equal(certificates.OidExtensionPrecertificateSCT):
+			scts := certificates.FormatSCTList(ext.Value)
+			sb.WriteString(fmt.Sprintf("                        %s\n", scts))
+
+		// OCSP Must Staple
+		case ext.Id.Equal(certificates.OidOCSPMustStaple):
+			sb.WriteString("                        OCSP Must-Staple\n")
+
+		default:
+			// Unknown extension - show raw data
+			hexData := hex.EncodeToString(ext.Value)
+			sb.WriteString(fmt.Sprintf("                        %s\n", utils.FormatHexWithColons(hexData)))
+		}
+	}
+
+	return sb.String()
 }
 
 // Create Keys using other functions
@@ -200,14 +167,25 @@ func CreateCSR(ctx context.Context, c *cli.Command) (err error) {
 	if !ok {
 		return fmt.Errorf("Invalid signature")
 	}
+
+	IPSlice := make([]net.IP, 0)
+
+	for _, v := range c.StringSlice("ip") {
+		IPSlice = append(IPSlice, net.ParseIP(v))
+
+	}
+
 	certRequest := x509.CertificateRequest{
 		SignatureAlgorithm: signatureAlg,
 		Subject:            name,
 		DNSNames:           c.StringSlice("dns"),
+		IPAddresses:        IPSlice,
+		Version:            1,
 	}
 
 	// Generate key or read existing key
 
+	// Switch to correct signature algorithim based on key alg
 	keyConfig := strings.Split(c.String("keyOpt"), ":")
 	keyAlg := strings.ToUpper(keyConfig[0])
 	keyOpt := strings.ToUpper(keyConfig[1])
@@ -233,7 +211,6 @@ func CreateCSR(ctx context.Context, c *cli.Command) (err error) {
 			return fmt.Errorf("Failed to generate key")
 		}
 	} else if keyAlg == "RSA" {
-
 		if dsa != "RSA" && dsa != "RSAPSS" {
 			return fmt.Errorf("Signature algorithim does not match key type")
 		}

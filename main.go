@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
+	"cert-manager/certificates"
 	"cert-manager/cmd"
 	"cert-manager/csr"
 	"cert-manager/internal/utils"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -21,18 +21,7 @@ type CLI struct {
 }
 
 func main() {
-
-	//scanner := bufio.NewScanner(os.Stdin)
-
-	//var config tls.Config
-	//conn, err := tls.Dial("tcp", "google.com:443", &config)
-	//if err != nil {
-	//	fmt.Println(err)
-	//	os.Exit(1)
-	//}
-
 	setupCLI()
-
 }
 
 func setupCLI() {
@@ -192,28 +181,35 @@ func decodeCertCmd(ctx context.Context, c *cli.Command) (err error) {
 	return nil
 }
 
-func decodeCert(data []byte, json bool) (string, error) {
+func decodeCert(data []byte, jsonOpt bool) (string, error) {
 	p, _ := pem.Decode(data)
 
 	if p.Type == "CERTIFICATE REQUEST" {
-		csr, err := csr.ParseCSR(p.Bytes)
+		parsedCSR, err := csr.ParseCSR(p.Bytes)
 		if err != nil {
 			return "", err
 		}
 
-		if json {
-			return csr.JsonCSR()
+		if jsonOpt {
+			out, err := json.MarshalIndent(parsedCSR, "", "  ")
+			return string(out), err
 		} else {
-			return csr.PrintCSR()
+			return parsedCSR.PrintCSR()
 		}
 
 	} else if p.Type == "CERTIFICATE" {
-		req, err := x509.ParseCertificate(p.Bytes)
+		cert, err := certificates.ParseCertificate(p.Bytes)
 		if err != nil {
 			return "", err
 		}
 
-		fmt.Println(req)
+		if jsonOpt {
+			out, err := json.Marshal(cert)
+			return string(out), err
+		} else {
+			return cert.PrintCertificate()
+
+		}
 	}
 
 	return "", fmt.Errorf("invalid certificate headers")
@@ -222,5 +218,6 @@ func decodeCert(data []byte, json bool) (string, error) {
 // View certificates from existing sites
 // View certificates on local machine
 // Create/View CSRs
+
 // Create self-signed certificate
 // Sign CSR
